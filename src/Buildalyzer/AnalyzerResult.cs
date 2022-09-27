@@ -1,4 +1,5 @@
 using System;
+using System.CodeDom.Compiler;
 using System.Collections;
 using System.Collections.Generic;
 using System.IO;
@@ -24,12 +25,10 @@ namespace Buildalyzer
             "fsc.exe",
             "fsc.dll"
         };
-        private List<(string, string)> _cscCommandLineArguments;
         private List<(string, string)> _fscCommandLineArguments;
         private List<(string, string)> _vbcCommandLineArguments;
-        private string _command;
-        private string[] _compilerArguments;
-        private string _compilerFilePath;
+        private List<ProcessedCommandLine> _commandDetails;
+        private ProcessedCommandLine? _primaryCommandDetail;
 
         internal AnalyzerResult(string projectFilePath, AnalyzerManager manager, ProjectAnalyzer analyzer)
         {
@@ -64,13 +63,13 @@ namespace Buildalyzer
         public Guid ProjectGuid => _projectGuid;
 
         /// <inheritdoc/>
-        public string Command => _command;
+        public string Command => _primaryCommandDetail?.Command;
 
         /// <inheritdoc/>
-        public string CompilerFilePath => _compilerFilePath;
+        public string CompilerFilePath => _primaryCommandDetail?.FileName;
 
         /// <inheritdoc/>
-        public string[] CompilerArguments => _compilerArguments;
+        public string[] CompilerArguments => _primaryCommandDetail?.Arguments.ToArray();
 
         /// <inheritdoc/>
         public string GetProperty(string name) =>
@@ -84,7 +83,7 @@ namespace Buildalyzer
             .FirstOrDefault();
 
         public string[] SourceFiles =>
-            _cscCommandLineArguments
+            _commandDetails.SelectMany(x => x.ProcessedArguments)
                 ?.Where(x => x.Item1 == null
                     && !string.Equals(Path.GetFileName(x.Item2), "csc.dll", StringComparison.OrdinalIgnoreCase)
                     && !string.Equals(Path.GetFileName(x.Item2), "csc.exe", StringComparison.OrdinalIgnoreCase))
@@ -100,7 +99,7 @@ namespace Buildalyzer
                 .ToArray() ?? Array.Empty<string>();
 
         public string[] References =>
-            _cscCommandLineArguments
+            _commandDetails.SelectMany(x => x.ProcessedArguments)
                 ?.Where(x => x.Item1 is object && x.Item1.Equals("reference", StringComparison.OrdinalIgnoreCase))
                 .Select(x => x.Item2)
                 .ToArray()
@@ -115,13 +114,13 @@ namespace Buildalyzer
             ?? Array.Empty<string>();
 
         public string[] AnalyzerReferences =>
-            _cscCommandLineArguments
+            _commandDetails.SelectMany(x => x.ProcessedArguments)
                 ?.Where(x => x.Item1 is object && x.Item1.Equals("analyzer", StringComparison.OrdinalIgnoreCase))
                 .Select(x => x.Item2)
                 .ToArray() ?? Array.Empty<string>();
 
         public string[] PreprocessorSymbols =>
-            _cscCommandLineArguments
+            _commandDetails.SelectMany(x => x.ProcessedArguments)
                 ?.Where(x => x.Item1 is object && x.Item1.Equals("define", StringComparison.OrdinalIgnoreCase))
                 .SelectMany(x => x.Item2.Split(new[] { ';' }, StringSplitOptions.RemoveEmptyEntries))
                 .Select(x => x.Trim())
@@ -134,7 +133,7 @@ namespace Buildalyzer
             ?? Array.Empty<string>();
 
         public string[] AdditionalFiles =>
-            _cscCommandLineArguments
+            _commandDetails.SelectMany(x => x.ProcessedArguments)
                 ?.Where(x => x.Item1 is object && x.Item1.Equals("additionalfile", StringComparison.OrdinalIgnoreCase))
                 .SelectMany(x => x.Item2.Split(new[] { ';' }, StringSplitOptions.RemoveEmptyEntries))
                 .Select(x => x.Trim())
@@ -182,18 +181,15 @@ namespace Buildalyzer
             }
 
             ProcessedCommandLine cmd = ProcessCscCommandLine(commandLine);
+            cmd.IsCoreCompile = coreCompile;
 
-            // Some projects can have multiple Csc calls (see #92) so if this is the one inside CoreCompile use it, otherwise use the first
-            if (coreCompile || _cscCommandLineArguments == null)
+            if (_primaryCommandDetail == null || coreCompile)
             {
-                _command = cmd.Command;
-                _compilerFilePath = cmd.FileName;
-                _compilerArguments = cmd.Arguments.ToArray();
+                _primaryCommandDetail = cmd;
             }
 
-            // Azure function app projects have multiple Csc calls all of which are marked as coreCompile, so aggregate the ProcessedArguments.
-            _cscCommandLineArguments ??= new List<(string, string)>();
-            _cscCommandLineArguments.AddRange(cmd.ProcessedArguments);
+            _commandDetails ??= new List<ProcessedCommandLine>();
+            _commandDetails.Add(cmd);
         }
 
         internal static ProcessedCommandLine ProcessCscCommandLine(string commandLine)
@@ -207,6 +203,7 @@ namespace Buildalyzer
             public string FileName;
             public List<string> Arguments;
             public List<(string, string)> ProcessedArguments;
+            public bool IsCoreCompile;
         }
 
         internal static ProcessedCommandLine ProcessCommandLine(string commandLine, string initialCommandEnd)
